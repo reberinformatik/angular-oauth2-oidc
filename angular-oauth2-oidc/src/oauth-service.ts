@@ -1485,7 +1485,9 @@ export class OAuthService
 
         // For backward compatibility
         if (this.logoutUrl.indexOf('{{') > -1) {
-            logoutUrl = this.logoutUrl.replace(/\{\{id_token\}\}/, id_token);
+            logoutUrl = this.logoutUrl
+                .replace(/\{\{id_token\}\}/, id_token)
+                .replace(/\{\{client_id\}\}/, this.clientId);
         }
         else {
             logoutUrl = this.logoutUrl +
