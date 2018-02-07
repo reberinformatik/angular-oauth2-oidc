@@ -1029,9 +1029,7 @@ export class OAuthService
             addParams = params;
         }
 
-        this.createLoginUrl(additionalState, loginHint, null, false, addParams).then(function (url) {
-            location.href = url;
-        })
+        this.createLoginUrl(additionalState, loginHint, null, false, addParams).then(this.config.openUri)
         .catch(error => {
             console.error('Error in initImplicitFlow');
             console.error(error);
