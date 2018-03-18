@@ -208,6 +208,12 @@ export class AuthConfig {
      */
     public skipIssuerCheck? = false;
 
+    constructor(json?: Partial<AuthConfig>) {
+    if (json) {
+      Object.assign(this, json);
+     }
+    }
+    
     /*
      * final state sent to issuer is built as follows:
      * state = nonce + nonceStateSeparator + additional state
