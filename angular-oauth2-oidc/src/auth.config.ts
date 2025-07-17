@@ -186,14 +186,6 @@ export class AuthConfig {
      */
     public disableAtHashCheck? = false;
 
-    /**
-     * This property allows you to override the method that is used to open the login url,
-     * allowing a way for implementations to specify their own method of routing to new
-     * urls.
-     */
-    public openUri?: ((uri: string) => void) = (uri) => { location.href = uri; }
-
-
     /*
      * Defines wether to check the subject of a refreshed token after silent refresh.
      * Normally, it should be the same as before.
@@ -207,18 +199,51 @@ export class AuthConfig {
      * Normally, the discovey document's url starts with the url of the issuer.
      */
     public skipIssuerCheck? = false;
+      
+    /**
+     * According to rfc6749 it is recommended (but not required) that the auth
+     * server exposes the access_token's life time in seconds.
+     * This is a fallback value for the case this value is not exposed.
+     */
+    public fallbackAccessTokenExpirationTimeInSec?: number;
 
-    constructor(json?: Partial<AuthConfig>) {
-    if (json) {
-      Object.assign(this, json);
-     }
-    }
-    
     /*
      * final state sent to issuer is built as follows:
      * state = nonce + nonceStateSeparator + additional state
      * Default separator is ';' (encoded %3B).
      * In rare cases, this character might be forbidden or inconvenient to use by the issuer so it can be customized.
      */
-    public nonceStateSeparator? = ';';    
+    public nonceStateSeparator? = ';';
+
+    /**
+     * Set this to true to use HTTP BASIC auth for password flow
+     */
+    public useHttpBasicAuth? = false;
+
+    /**
+     * The window of time (in seconds) to allow the current time to deviate when validating id_token's iat and exp values.
+     */
+    public clockSkewInSec?: 600;
+    
+    /**
+     * Code Flow is by defauld used together with PKCI which is also higly recommented.
+     * You can disbale it here by setting this flag to true.
+     * https://tools.ietf.org/html/rfc7636#section-1.1
+     */
+    public disablePKCE? = false;
+
+    constructor(json?: Partial<AuthConfig>) {
+      if (json) {
+        Object.assign(this, json);
+      }
+    }
+
+    /**
+     * This property allows you to override the method that is used to open the login url,
+     * allowing a way for implementations to specify their own method of routing to new
+     * urls.
+     */
+    public openUri?: ((uri: string) => void) = uri => {
+      location.href = uri;
+    }
 }

@@ -41,6 +41,13 @@ export class LoginOptions {
      * OIDC.
      */
     disableOAuth2StateCheck?: boolean;
+    
+    /**
+     * Normally, you want to clear your hash fragment after
+     * the lib read the token(s) so that they are not displayed
+     * anymore in the url. If not, set this to true.
+     */
+    preventClearHashAfterLogin? = false;
 }
 
 /**
@@ -70,12 +77,12 @@ export class ReceivedTokens {
  * Represents the parsed and validated id_token.
  */
 export interface ParsedIdToken {
-    idToken: string;
-    idTokenClaims: object;
-    idTokenHeader: object;
-    idTokenClaimsJson: string;
-    idTokenHeaderJson: string;
-    idTokenExpiresAt: number;
+  idToken: string;
+  idTokenClaims: object;
+  idTokenHeader: object;
+  idTokenClaimsJson: string;
+  idTokenHeaderJson: string;
+  idTokenExpiresAt: number;
 }
 
 /**
@@ -83,12 +90,13 @@ export interface ParsedIdToken {
  * http://openid.net/specs/openid-connect-core-1_0.html#TokenEndpoint
  */
 export interface TokenResponse {
-    access_token: string;
-    token_type: string;
-    expires_in: number;
-    refresh_token: string;
-    scope: string;
-    state?: string;
+  access_token: string;
+  id_token: string; 
+  token_type: string;
+  expires_in: number;
+  refresh_token: string;
+  scope: string;
+  state?: string;
 }
 
 /**

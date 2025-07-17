@@ -7,3 +7,11 @@ export function b64DecodeUnicode(str) {
         return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
     }).join(''));
 }
+
+export function base64UrlEncode(str): string {
+  const base64 = btoa(str);
+  return base64
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+}

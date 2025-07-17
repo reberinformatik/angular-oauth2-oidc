@@ -3,14 +3,19 @@ import { HttpClient, HttpHeaders, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs/Observable';
 import { Subject } from 'rxjs/Subject';
 import { Subscription } from 'rxjs/Subscription';
+import { of } from 'rxjs/observable/of';
+import { from } from 'rxjs/observable/from';
+import { race } from 'rxjs/observable/race';
+import { filter, delay, first, tap, map, switchMap } from 'rxjs/operators';
 
 import { ValidationHandler, ValidationParams } from './token-validation/validation-handler';
 import { UrlHelperService } from './url-helper.service';
 import { OAuthEvent, OAuthInfoEvent, OAuthErrorEvent, OAuthSuccessEvent } from './events';
 import { OAuthStorage, LoginOptions, ParsedIdToken, OidcDiscoveryDoc, TokenResponse, UserInfo } from './types';
-import { b64DecodeUnicode } from './base64-helper';
+import { b64DecodeUnicode, base64UrlEncode } from './base64-helper';
 import { AuthConfig } from './auth.config';
 import { WebHttpUrlEncodingCodec } from './encoder';
+import { CryptoHandler } from './token-validation/crypto-handler';
 
 /**
  * Service for logging in and logging out with
@@ -73,7 +78,8 @@ export class OAuthService
         @Optional() storage: OAuthStorage,
         @Optional() tokenValidationHandler: ValidationHandler,
         @Optional() private config: AuthConfig,
-        private urlHelper: UrlHelperService) {
+        private urlHelper: UrlHelperService,
+        @Optional() protected crypto: CryptoHandler) {
 
         super();
 
@@ -144,19 +150,43 @@ export class OAuthService
     }
 
     /**
-     * 
+     * Will setup up silent refreshing for when the token is
+     * about to expire. When the user is logged out via this.logOut method, the
+     * silent refreshing will pause and not refresh the tokens until the user is
+     * logged back in via receiving a new token.
      * @param params Additional parameter to pass
+     * @param listenTo Setup automatic refresh of a specific token type
      */
-    public setupAutomaticSilentRefresh(params: object = {}) {
-        this.events
-            .filter(e => e.type === 'token_expires')
-            .subscribe(e => {
-                this.silentRefresh(params).catch(_ => {
-                    this.debug('automatic silent refresh did not work');
-                });
-            });
+    public setupAutomaticSilentRefresh(params: object = {}, listenTo?: 'access_token' | 'id_token' | 'any', noPrompt = true) {
+      let shouldRunSilentRefresh = true;
+      this.events.pipe(
+        tap((e: OAuthEvent) => {
+          if (e.type === 'token_received') {
+            shouldRunSilentRefresh = true;
+          } else if (e.type === 'logout') {
+            shouldRunSilentRefresh = false;
+          }
+        }),
+        filter((e: OAuthEvent) => e.type === 'token_expires')
+      ).subscribe((e: OAuthEvent) => {
+        const event = e as OAuthInfoEvent;
+        if ((listenTo == null || listenTo === 'any' || event.info === listenTo) && shouldRunSilentRefresh) {
+          // this.silentRefresh(params, noPrompt).catch(_ => {
+          this.refreshInternal(params, noPrompt).catch(_ => {
+            this.debug('Automatic silent refresh did not work');
+          });
+        }
+      });
 
-        this.restartRefreshTimerIfStillLoggedIn();
+      this.restartRefreshTimerIfStillLoggedIn();
+    }
+
+    protected refreshInternal(params, noPrompt) {
+        if (this.responseType === 'code') {
+            return this.refreshToken();
+        } else {
+            return this.silentRefresh(params, noPrompt);
+        }
     }
 
     public loadDiscoveryDocumentAndTryLogin(options: LoginOptions = null) {
@@ -611,7 +641,7 @@ export class OAuthService
 
     }
 
-    /**
+        /**
      * Refreshes the token using a refresh_token.
      * This does not work for implicit flow, b/c
      * there is no refresh_token in this flow.
@@ -619,9 +649,10 @@ export class OAuthService
      * method silentRefresh.
      */
     public refreshToken(): Promise<object> {
-
         if (!this.validateUrlForHttps(this.tokenEndpoint)) {
-            throw new Error('tokenEndpoint must use Http. Also check property requireHttps.');
+            throw new Error(
+                'tokenEndpoint must use https, or config value for property requireHttps must allow http'
+            );
         }
 
         return new Promise((resolve, reject) => {
@@ -636,29 +667,52 @@ export class OAuthService
             }
 
             if (this.customQueryParams) {
-                for (let key of Object.getOwnPropertyNames(this.customQueryParams)) {
+                for (const key of Object.getOwnPropertyNames(this.customQueryParams)) {
                     params = params.set(key, this.customQueryParams[key]);
                 }
             }
 
-            const headers = new HttpHeaders()
-                .set('Content-Type', 'application/x-www-form-urlencoded');
-
-            this.http.post<TokenResponse>(this.tokenEndpoint, params, { headers }).subscribe(
-                (tokenResponse) => {
-                    this.debug('refresh tokenResponse', tokenResponse);
-                    this.storeAccessTokenResponse(tokenResponse.access_token, tokenResponse.refresh_token, tokenResponse.expires_in, tokenResponse.scope);
-
-                    this.eventsSubject.next(new OAuthSuccessEvent('token_received'));
-                    this.eventsSubject.next(new OAuthSuccessEvent('token_refreshed'));
-                    resolve(tokenResponse);
-                },
-                (err) => {
-                    console.error('Error performing password flow', err);
-                    this.eventsSubject.next(new OAuthErrorEvent('token_refresh_error', err));
-                    reject(err);
-                }
+            const headers = new HttpHeaders().set(
+                'Content-Type',
+                'application/x-www-form-urlencoded'
             );
+
+            this.http
+                .post<TokenResponse>(this.tokenEndpoint, params, { headers })
+                .pipe(switchMap((tokenResponse: TokenResponse) => {
+                    if (tokenResponse.id_token) {
+                        return from(this.processIdToken(tokenResponse.id_token, tokenResponse.access_token, true))
+                            .pipe(
+                                tap((result: ParsedIdToken) => this.storeIdToken(result)),
+                                map(_ => tokenResponse)
+                            );
+                    }
+                    else {
+                        return of(tokenResponse);
+                    }
+                }))
+                .subscribe(
+                    tokenResponse => {
+                        this.debug('refresh tokenResponse', tokenResponse);
+                        this.storeAccessTokenResponse(
+                            tokenResponse.access_token,
+                            tokenResponse.refresh_token,
+                            tokenResponse.expires_in,
+                            tokenResponse.scope
+                        );
+
+                        this.eventsSubject.next(new OAuthSuccessEvent('token_received'));
+                        this.eventsSubject.next(new OAuthSuccessEvent('token_refreshed'));
+                        resolve(tokenResponse);
+                    },
+                    err => {
+                        console.error('Error performing password flow', err);
+                        this.eventsSubject.next(
+                            new OAuthErrorEvent('token_refresh_error', err)
+                        );
+                        reject(err);
+                    }
+                );
         });
     }
 
@@ -704,71 +758,79 @@ export class OAuthService
     }
 
 
-    /**
+     /**
      * Performs a silent refresh for implicit flow.
-     * Use this method to get a new tokens when/ before
-     * the existing tokens expires.
+     * Use this method to get new tokens when/before
+     * the existing tokens expire.
      */
-    public silentRefresh(params: object = {}): Promise<OAuthEvent> {
+    public silentRefresh(params: object = {}, noPrompt = true): Promise<OAuthEvent> {
+        const claims: object = this.getIdentityClaims() || {};
 
-        let claims: object = this.getIdentityClaims() || {};
-
-        if (this.useIdTokenHintForSilentRefresh
-            && this.hasValidIdToken) {
+        if (this.useIdTokenHintForSilentRefresh && this.hasValidIdToken()) {
             params['id_token_hint'] = this.getIdToken();
         }
 
-        /*
-        if (!claims) {
-            throw new Error('cannot perform a silent refresh as the user is not logged in');
+        if (!this.validateUrlForHttps(this.loginUrl)) {
+            throw new Error(
+                'tokenEndpoint must use https, or config value for property requireHttps must allow http'
+            );
         }
-        */
-
-        if (!this.validateUrlForHttps(this.loginUrl)) throw new Error('tokenEndpoint must use Https. Also check property requireHttps.');
 
         if (typeof document === 'undefined') {
             throw new Error('silent refresh is not supported on this platform');
         }
 
-        let existingIframe = document.getElementById(this.silentRefreshIFrameName);
+        const existingIframe = document.getElementById(
+            this.silentRefreshIFrameName
+        );
+
         if (existingIframe) {
             document.body.removeChild(existingIframe);
         }
 
         this.silentRefreshSubject = claims['sub'];
 
-        let iframe = document.createElement('iframe');
+        const iframe = document.createElement('iframe');
         iframe.id = this.silentRefreshIFrameName;
 
         this.setupSilentRefreshEventListener();
 
-        let redirectUri = this.silentRefreshRedirectUri || this.redirectUri;
-        this.createLoginUrl(null, null, redirectUri, true, params).then(url => {
+        const redirectUri = this.silentRefreshRedirectUri || this.redirectUri;
+        this.createLoginUrl(null, null, redirectUri, noPrompt, params).then(url => {
             iframe.setAttribute('src', url);
+
             if (!this.silentRefreshShowIFrame) {
                 iframe.style['display'] = 'none';
             }
             document.body.appendChild(iframe);
         });
 
-        let errors = this.events.filter(e => e instanceof OAuthErrorEvent).first();
-        let success = this.events.filter(e => e.type === 'silently_refreshed').first();
-        let timeout = Observable.of(new OAuthErrorEvent('silent_refresh_timeout', null))
-            .delay(this.silentRefreshTimeout || this.siletRefreshTimeout);
+        const errors = this.events.pipe(
+            filter(e => e instanceof OAuthErrorEvent),
+            first()
+        );
+        const success = this.events.pipe(
+            filter((e: OAuthEvent) => e.type === 'silently_refreshed'),
+            first()
+        );
+        const timeout = of(
+            new OAuthErrorEvent('silent_refresh_timeout', null)
+        ).pipe(delay(this.silentRefreshTimeout));
 
-        return Observable
-            .race([errors, success, timeout])
-            .do(e => {
-                if (e.type === 'silent_refresh_timeout') {
-                    this.eventsSubject.next(e);
-                }
-            })
-            .map(e => {
-                if (e instanceof OAuthErrorEvent) {
-                    throw e;
-                }
-                return e;
-            })
+        return race([errors, success, timeout])
+            .pipe(
+                tap((e: OAuthEvent) => {
+                    if (e.type === 'silent_refresh_timeout') {
+                        this.eventsSubject.next(e);
+                    }
+                }),
+                map((e: OAuthEvent) => {
+                    if (e instanceof OAuthErrorEvent) {
+                        throw e;
+                    }
+                    return e;
+                })
+            )
             .toPromise();
     }
 
@@ -922,97 +984,110 @@ export class OAuthService
         iframe.contentWindow.postMessage(message, this.issuer);
     }
 
-    private createLoginUrl(
+    protected async createLoginUrl(
         state = '',
         loginHint = '',
         customRedirectUri = '',
         noPrompt = false,
         params: object = {}
     ) {
-        let that = this;
+        const that = this;
 
         let redirectUri: string;
 
         if (customRedirectUri) {
             redirectUri = customRedirectUri;
-        }
-        else {
+        } else {
             redirectUri = this.redirectUri;
         }
 
-        return this.createAndSaveNonce().then((nonce: any) => {
+        const nonce = await this.createAndSaveNonce();
 
-            if (state) {
-                state = nonce + this.config.nonceStateSeparator + state;
-            }
-            else {
-                state = nonce;
-            }
+        if (state) {
+            state = nonce + this.config.nonceStateSeparator + state;
+        } else {
+            state = nonce;
+        }
 
-            if (!this.requestAccessToken && !this.oidc) {
-                throw new Error('Either requestAccessToken or oidc or both must be true');
-            }
+        if (!this.requestAccessToken && !this.oidc) {
+            throw new Error(
+                'Either requestAccessToken or oidc or both must be true'
+            );
+        }
 
+        if (this.config.responseType) {
+            this.responseType = this.config.responseType;
+        } else {
             if (this.oidc && this.requestAccessToken) {
                 this.responseType = 'id_token token';
-            }
-            else if (this.oidc && !this.requestAccessToken) {
+            } else if (this.oidc && !this.requestAccessToken) {
                 this.responseType = 'id_token';
-            }
-            else {
+            } else {
                 this.responseType = 'token';
             }
+        }
 
-            let seperationChar = (that.loginUrl.indexOf('?') > -1) ? '&' : '?';
+        const seperationChar = that.loginUrl.indexOf('?') > -1 ? '&' : '?';
 
-            let scope = that.scope;
+        let scope = that.scope;
 
-            if (this.oidc && !scope.match(/(^|\s)openid($|\s)/)) {
-                scope = 'openid ' + scope;
+        if (this.oidc && !scope.match(/(^|\s)openid($|\s)/)) {
+            scope = 'openid ' + scope;
+        }
+
+        let url =
+            that.loginUrl +
+            seperationChar +
+            'response_type=' +
+            encodeURIComponent(that.responseType) +
+            '&client_id=' +
+            encodeURIComponent(that.clientId) +
+            '&state=' +
+            encodeURIComponent(state) +
+            '&redirect_uri=' +
+            encodeURIComponent(redirectUri) +
+            '&scope=' +
+            encodeURIComponent(scope);
+
+        if (this.responseType === 'code' && !this.disablePKCE) {
+            const [challenge, verifier] = await this.createChallangeVerifierPairForPKCE();
+            this._storage.setItem('PKCI_verifier', verifier);
+            url += '&code_challenge=' + challenge;
+            url += '&code_challenge_method=S256';
+        }
+
+        if (loginHint) {
+            url += '&login_hint=' + encodeURIComponent(loginHint);
+        }
+
+        if (that.resource) {
+            url += '&resource=' + encodeURIComponent(that.resource);
+        }
+
+        if (that.oidc) {
+            url += '&nonce=' + encodeURIComponent(nonce);
+        }
+
+        if (noPrompt) {
+            url += '&prompt=none';
+        }
+
+        for (const key of Object.keys(params)) {
+            url +=
+                '&' + encodeURIComponent(key) + '=' + encodeURIComponent(params[key]);
+        }
+
+        if (this.customQueryParams) {
+            for (const key of Object.getOwnPropertyNames(this.customQueryParams)) {
+                url +=
+                    '&' + key + '=' + encodeURIComponent(this.customQueryParams[key]);
             }
+        }
 
-            let url = that.loginUrl
-                + seperationChar
-                + 'response_type='
-                + encodeURIComponent(that.responseType)
-                + '&client_id='
-                + encodeURIComponent(that.clientId)
-                + '&state='
-                + encodeURIComponent(state)
-                + '&redirect_uri='
-                + encodeURIComponent(redirectUri)
-                + '&scope='
-                + encodeURIComponent(scope);
+        return url;
+        
+    }
 
-            if (loginHint) {
-                url += '&login_hint=' + encodeURIComponent(loginHint);
-            }
-
-            if (that.resource) {
-                url += '&resource=' + encodeURIComponent(that.resource);
-            }
-
-            if (that.oidc) {
-                url += '&nonce=' + encodeURIComponent(nonce);
-            }
-
-            if (noPrompt) {
-                url += '&prompt=none';
-            }
-
-            for (let key of Object.keys(params)) {
-                url += '&' + encodeURIComponent(key) + '=' + encodeURIComponent(params[key]);
-            }
-
-            if (this.customQueryParams) {
-                for (let key of Object.getOwnPropertyNames(this.customQueryParams)) {
-                    url += '&' + key + '=' + encodeURIComponent(this.customQueryParams[key]);
-                }
-            }
-
-            return url;
-        });
-    };
 
     initImplicitFlowInternal(additionalState = '', params: string | object = ''): void {
 
@@ -1093,6 +1168,157 @@ export class OAuthService
     }
 
     /**
+     * Delegates to tryLoginImplicitFlow for the sake of competability
+     * @param options Optional options.
+     */
+    public tryLogin(options: LoginOptions = null): Promise<boolean> {
+        if (this.config.responseType === 'code') {
+            return this.tryLoginCodeFlow().then(_ => true);
+        }
+        else {
+            return this.tryLoginImplicitFlow(options);
+        }
+    }
+
+
+    private parseQueryString(queryString: string): object {
+        if (!queryString || queryString.length === 0) {
+            return {};
+        }
+
+        if (queryString.charAt(0) === '?') {
+            queryString = queryString.substr(1);
+        }
+
+        return this.urlHelper.parseQueryString(queryString);
+
+
+    }
+
+    public tryLoginCodeFlow(): Promise<void> {
+
+        const parts = this.parseQueryString(window.location.search)
+
+        const code = parts['code'];
+        const state = parts['state'];
+
+        let [nonceInState, userState] = this.parseState(state);
+        this.state = userState;
+
+        if (parts['error']) {
+            this.debug('error trying to login');
+            this.handleLoginError({}, parts);
+            const err = new OAuthErrorEvent('code_error', {}, parts);
+            this.eventsSubject.next(err);
+            return Promise.reject(err);
+        }
+
+        const success = this.validateNonce(nonceInState);
+        if (!success) {
+            const event = new OAuthErrorEvent('invalid_nonce_in_state', null);
+            this.eventsSubject.next(event);
+            return Promise.reject(event);
+        }
+
+        if (code) {
+            return new Promise<void>((resolve, reject) => {
+                this.getTokenFromCode(code).then((result: object) => {
+                    resolve();
+                }).catch(err => {
+                    reject(err);
+                });
+            });
+        } else {
+            return Promise.resolve();
+        }
+    }
+
+    /**
+     * Get token using an intermediate code. Works for the Authorization Code flow.
+     */
+    private getTokenFromCode(code: string): Promise<object> {
+        let params = new HttpParams()
+            .set('grant_type', 'authorization_code')
+            .set('code', code)
+            .set('redirect_uri', this.redirectUri);
+        return this.fetchAndProcessToken(params);
+    }
+
+    private fetchAndProcessToken(params: HttpParams): Promise<object> {    
+
+        let headers = new HttpHeaders()
+                                .set('Content-Type', 'application/x-www-form-urlencoded');
+
+        if (!this.validateUrlForHttps(this.tokenEndpoint)) {
+            throw new Error('tokenEndpoint must use Http. Also check property requireHttps.');
+        }
+
+        if (this.useHttpBasicAuth) {
+            const header = btoa(`${this.clientId}:${this.dummyClientSecret}`);
+            headers = headers.set(
+                'Authorization',
+                'Basic ' + header);
+        }
+
+        if (!this.useHttpBasicAuth) {
+            params = params.set('client_id', this.clientId);
+        }
+
+        if (!this.useHttpBasicAuth && this.dummyClientSecret) {
+            params = params.set('client_secret', this.dummyClientSecret);
+        }
+
+        return new Promise((resolve, reject) => {
+
+            if (this.customQueryParams) {
+                for (let key of Object.getOwnPropertyNames(this.customQueryParams)) {
+                    params = params.set(key, this.customQueryParams[key]);
+                }
+            }
+
+            this.http.post<TokenResponse>(this.tokenEndpoint, params, { headers }).subscribe(
+                (tokenResponse) => {
+                    this.debug('refresh tokenResponse', tokenResponse);
+                    this.storeAccessTokenResponse(
+                        tokenResponse.access_token, 
+                        tokenResponse.refresh_token, 
+                        tokenResponse.expires_in,
+                        tokenResponse.scope);
+
+                    if (this.oidc && tokenResponse.id_token) {
+                        this.processIdToken(tokenResponse.id_token, tokenResponse.access_token).  
+                        then(result => {
+                            this.storeIdToken(result);
+            
+                            this.eventsSubject.next(new OAuthSuccessEvent('token_received'));
+                            this.eventsSubject.next(new OAuthSuccessEvent('token_refreshed'));
+            
+                            resolve(tokenResponse);
+                        })
+                        .catch(reason => {
+                            this.eventsSubject.next(new OAuthErrorEvent('token_validation_error', reason));
+                            console.error('Error validating tokens');
+                            console.error(reason);
+            
+                            reject(reason);
+                        });
+                    } else {
+                        this.eventsSubject.next(new OAuthSuccessEvent('token_received'));
+                        this.eventsSubject.next(new OAuthSuccessEvent('token_refreshed'));
+            
+                        resolve(tokenResponse);
+                    }
+                },
+                (err) => {
+                    console.error('Error getting token', err);
+                    this.eventsSubject.next(new OAuthErrorEvent('token_refresh_error', err));
+                    reject(err);
+                }
+            );
+        });
+    }
+
+    /**
      * Checks whether there are tokens in the hash fragment
      * as a result of the implicit flow. These tokens are
      * parsed, validated and used to sign the user in to the
@@ -1100,119 +1326,148 @@ export class OAuthService
      *
      * @param options Optinal options.
      */
-    public tryLogin(options: LoginOptions = null): Promise<void> {
-
+    public tryLoginImplicitFlow(options: LoginOptions = null): Promise<boolean> {
         options = options || {};
 
         let parts: object;
 
         if (options.customHashFragment) {
             parts = this.urlHelper.getHashFragmentParams(options.customHashFragment);
-        }
-        else {
+        } else {
             parts = this.urlHelper.getHashFragmentParams();
         }
 
         this.debug('parsed url', parts);
 
-        let state = decodeURIComponent(parts['state']);
-       
+        const state = parts['state'];
+
+        let [nonceInState, userState] = this.parseState(state);
+        this.state = userState;
+
         if (parts['error']) {
             this.debug('error trying to login');
             this.handleLoginError(options, parts);
-            let err = new OAuthErrorEvent('token_error', {}, parts);
+            const err = new OAuthErrorEvent('token_error', {}, parts);
             this.eventsSubject.next(err);
             return Promise.reject(err);
         }
 
-        let accessToken = parts['access_token'];
-        let idToken = parts['id_token'];        
-        let sessionState = parts['session_state'];
-        let grantedScopes = parts['scope'];
+        const accessToken = parts['access_token'];
+        const idToken = parts['id_token'];
+        const sessionState = parts['session_state'];
+        const grantedScopes = parts['scope'];
 
         if (!this.requestAccessToken && !this.oidc) {
-            return Promise.reject('Either requestAccessToken or oidc or both must be true.');
+            return Promise.reject(
+                'Either requestAccessToken or oidc (or both) must be true.'
+            );
         }
 
-        if (this.requestAccessToken && !accessToken) return Promise.resolve();
-        if (this.requestAccessToken && !options.disableOAuth2StateCheck && !state) return Promise.resolve();
-        if (this.oidc && !idToken) return Promise.resolve();
+        if (this.requestAccessToken && !accessToken) {
+            return Promise.resolve(false);
+        }
+        if (this.requestAccessToken && !options.disableOAuth2StateCheck && !state) {
+            return Promise.resolve(false);
+        }
+        if (this.oidc && !idToken) {
+            return Promise.resolve(false);
+        }
 
         if (this.sessionChecksEnabled && !sessionState) {
             console.warn(
-                'session checks (Session Status Change Notification) '
-                + 'is activated in the configuration but the id_token '
-                + 'does not contain a session_state claim');
+                'session checks (Session Status Change Notification) ' +
+                'were activated in the configuration but the id_token ' +
+                'does not contain a session_state claim'
+            );
         }
-
-        let nonceInState = state;
-        let idx = state.indexOf(';');
-
-        if (idx > -1) {
-            nonceInState = state.substr(0, idx);
-            this.state = state.substr(idx + 1);
-        }
-        /*
-        let stateParts = state.split(';');
-        if (stateParts.length > 1) {
-            this.state = stateParts[1];
-        }
-        */
-        // let nonceInState = stateParts[0];
 
         if (this.requestAccessToken && !options.disableOAuth2StateCheck) {
-            let success = this.validateNonceForAccessToken(accessToken, nonceInState);
+            const success = this.validateNonce(nonceInState);
+
             if (!success) {
-                let event = new OAuthErrorEvent('invalid_nonce_in_state', null);
+                const event = new OAuthErrorEvent('invalid_nonce_in_state', null);
                 this.eventsSubject.next(event);
                 return Promise.reject(event);
             }
         }
 
         if (this.requestAccessToken) {
-            this.storeAccessTokenResponse(accessToken, null, parts['expires_in'], grantedScopes);
+            this.storeAccessTokenResponse(
+                accessToken,
+                null,
+                parts['expires_in'] || this.fallbackAccessTokenExpirationTimeInSec,
+                grantedScopes
+            );
         }
 
         if (!this.oidc) {
             this.eventsSubject.next(new OAuthSuccessEvent('token_received'));
-            if (this.clearHashAfterLogin) location.hash = '';
-            return Promise.resolve();
+            if (this.clearHashAfterLogin && !options.preventClearHashAfterLogin) {
+                location.hash = '';
+            }
+
+            this.callOnTokenReceivedIfExists(options);
+            return Promise.resolve(true);
+
         }
 
-        return this
-            .processIdToken(idToken, accessToken)
+        return this.processIdToken(idToken, accessToken)
             .then(result => {
                 if (options.validationHandler) {
-                    return options.validationHandler({
-                        accessToken: accessToken,
-                        idClaims: result.idTokenClaims,
-                        idToken: result.idToken,
-                        state: state
-                    }).then(_ => result);
+                    return options
+                        .validationHandler({
+                            accessToken: accessToken,
+                            idClaims: result.idTokenClaims,
+                            idToken: result.idToken,
+                            state: state
+                        })
+                        .then(_ => result);
                 }
                 return result;
             })
             .then(result => {
                 this.storeIdToken(result);
                 this.storeSessionState(sessionState);
+                if (this.clearHashAfterLogin) {
+                    location.hash = '';
+                }
                 this.eventsSubject.next(new OAuthSuccessEvent('token_received'));
                 this.callOnTokenReceivedIfExists(options);
                 this.inImplicitFlow = false;
-                if (this.clearHashAfterLogin) location.hash = '';
+                return true;
             })
             .catch(reason => {
-                this.eventsSubject.next(new OAuthErrorEvent('token_validation_error', reason));
+                this.eventsSubject.next(
+                    new OAuthErrorEvent('token_validation_error', reason)
+                );
                 console.error('Error validating tokens');
                 console.error(reason);
                 return Promise.reject(reason);
             });
+    }
 
-    };
 
-    private validateNonceForAccessToken(accessToken: string, nonceInState: string): boolean {
+    private parseState(state: string): [string, string] {
+        let nonce = state;
+        let userState = '';
+
+        if (state) {
+            const idx = state.indexOf(this.config.nonceStateSeparator);
+            if (idx > -1) {
+                nonce = state.substr(0, idx);
+                userState = state.substr(idx + this.config.nonceStateSeparator.length);
+            }
+        }
+        return [nonce, userState];
+    }
+
+    protected validateNonce(
+        nonceInState: string
+    ): boolean {
         let savedNonce = this._storage.getItem('nonce');
         if (savedNonce !== nonceInState) {
-            let err = 'validating access_token failed. wrong state/nonce.';
+
+            const err = 'validating access_token failed. wrong state/nonce.';
             console.error(err, savedNonce, nonceInState);
             return false;
         }
@@ -1243,7 +1498,11 @@ export class OAuthService
     /**
      * @ignore
      */
-    public processIdToken(idToken: string, accessToken: string): Promise<ParsedIdToken> {
+    public processIdToken(
+        idToken: string,
+        accessToken: string,
+        skipNonceCheck = false
+    ): Promise<ParsedIdToken> {
 
         let tokenParts = idToken.split('.');
         let headerBase64 = this.padBase64(tokenParts[0]);
@@ -1310,7 +1569,7 @@ export class OAuthService
             return Promise.reject(err);
         }
 
-        if (claims.nonce !== savedNonce) {
+        if (!skipNonceCheck && claims.nonce !== savedNonce) {
             let err = 'Wrong nonce: ' + claims.nonce;
             console.warn(err);
             return Promise.reject(err);
@@ -1542,24 +1801,36 @@ export class OAuthService
     };
 
     protected createNonce(): Promise<string> {
-
-        return new Promise((resolve, reject) => {
-
+        return new Promise((resolve) => {
             if (this.rngUrl) {
-                throw new Error('createNonce with rng-web-api has not been implemented so far');
-            }
-            else {
-                let text = '';
-                let possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-
-                for (let i = 0; i < 40; i++)
-                    text += possible.charAt(Math.floor(Math.random() * possible.length));
-
-                resolve(text);
+                throw new Error(
+                    'createNonce with rng-web-api has not been implemented so far'
+                );
             }
 
+            /*
+             * This alphabet uses a-z A-Z 0-9 _- symbols.
+             * Symbols order was changed for better gzip compression.
+             */
+            const url = 'Uint8ArdomValuesObj012345679BCDEFGHIJKLMNPQRSTWXYZ_cfghkpqvwxyz-';
+            let size = 40;
+            let id = '';
+
+            const crypto = self.crypto || self['msCrypto'];
+            if (crypto) {
+                const bytes = crypto.getRandomValues(new Uint8Array(size));
+                while (0 < size--) {
+                    id += url[bytes[size] & 63];
+                }
+            } else {
+                while (0 < size--) {
+                    id += url[Math.random() * 64 | 0];
+                }
+            }
+
+            resolve(id);
         });
-    };
+    }
 
     private checkAtHash(params: ValidationParams): boolean {
 
@@ -1578,4 +1849,51 @@ export class OAuthService
         return this.tokenValidationHandler.validateSignature(params);
     }
 
+    /**
+     * Starts the authorization code flow and redirects to user to
+     * the auth servers login url.
+     */
+    public initCodeFlow(
+        additionalState = '',
+        params = {}
+    ): void {
+        if (this.loginUrl !== '') {
+            this.initCodeFlowInternal(additionalState, params);
+        } else {
+            this.events.pipe(filter((e: OAuthEvent) => e.type === 'discovery_document_loaded'))
+            .subscribe(_ => this.initCodeFlowInternal(additionalState, params));
+        }
+    }
+
+    private initCodeFlowInternal(
+        additionalState = '',
+        params = {}
+    ): void {
+
+        if (!this.validateUrlForHttps(this.loginUrl)) {
+            throw new Error('loginUrl must use Http. Also check property requireHttps.');
+        }
+
+        this.createLoginUrl(additionalState, '', null, false, params).then(function (url) {
+            location.href = url;
+        })
+        .catch(error => {
+            console.error('Error in initAuthorizationCodeFlow');
+            console.error(error);
+        });
+    }
+
+    protected async createChallangeVerifierPairForPKCE(): Promise<[string, string]> {
+
+        if (!this.crypto) {
+            throw new Error('PKCI support for code flow needs a CryptoHander. Did you import the OAuthModule using forRoot() ?');
+        }
+
+
+        const verifier = await this.createNonce();
+        const challengeRaw = await this.crypto.calcHash(verifier, 'sha-256');
+        const challange = base64UrlEncode(challengeRaw);
+
+        return [challange, verifier];
+    }
 }
