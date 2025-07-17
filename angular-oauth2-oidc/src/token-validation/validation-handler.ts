@@ -1,3 +1,5 @@
+import { base64UrlEncode } from "../base64-helper";
+
 export interface ValidationParams {
     idToken: string;
     accessToken: string;
@@ -47,9 +49,7 @@ export abstract class AbstractValidationHandler implements ValidationHandler {
 
         let leftMostHalf = tokenHash.substr(0, tokenHash.length / 2 );
 
-        let tokenHashBase64 = btoa(leftMostHalf);
-
-        let atHash = tokenHashBase64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        let atHash = base64UrlEncode(leftMostHalf);
         let claimsAtHash = params.idTokenClaims['at_hash'].replace(/=/g, '');
 
         if (atHash !== claimsAtHash) {
