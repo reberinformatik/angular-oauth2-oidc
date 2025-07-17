@@ -1116,15 +1116,7 @@ export class OAuthService
         this.debug('parsed url', parts);
 
         let state = decodeURIComponent(parts['state']);
-        let nonceInState = state;
-        let idx = state.indexOf(this.config.nonceStateSeparator);
-
-        if ( idx > -1) {
-            nonceInState = state.substr(0, idx);
-            this.state = state.substr(idx + this.config.nonceStateSeparator.length);
-        }
-        
-
+       
         if (parts['error']) {
             this.debug('error trying to login');
             this.handleLoginError(options, parts);
