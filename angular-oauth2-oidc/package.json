@@ -51,6 +51,8 @@
     "karma-coverage-istanbul-reporter": "^0.2.0",
     "karma-jasmine": "~1.1.0",
     "karma-jasmine-html-reporter": "^0.2.2",
+    "minimatch": "^3.1.2",
+    "glob": "7.2.3",
     "node-sass": "^4.5.2",
     "node-sass-tilde-importer": "^1.0.0",
     "node-watch": "^0.5.2",
@@ -68,6 +70,7 @@
   },
   "dependencies": {
     "@compodoc/compodoc": "^1.0.4",
-    "jsrsasign": "^8.0.3"
+    "jsrsasign": "^8.0.3",
+    "minimatch": "^3.1.2"
   }
 }
