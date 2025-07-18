@@ -131,7 +131,7 @@ return gulp.src(`${buildFolder}/**/*.js`)
     // The name to use for the module for UMD/IIFE bundles
     // (required for bundles with exports)
     // See "name" in https://rollupjs.org/#core-functionality
-    name: 'angular-oauth2-oidc',
+    name: 'angular-oauth2-oidc-rit',
 
     // See "globals" in https://rollupjs.org/#core-functionality
     globals: {
@@ -139,7 +139,7 @@ return gulp.src(`${buildFolder}/**/*.js`)
     }
 
   }))
-  .pipe(rename('angular-oauth2-oidc.umd.js'))
+  .pipe(rename('angular-oauth2-oidc-rit.umd.js'))
   .pipe(gulp.dest(distFolder));
 });
 

@@ -4,6 +4,12 @@ Support for OAuth 2 and OpenId Connect (OIDC) in Angular.
 
 ![OIDC Certified Logo](https://raw.githubusercontent.com/manfredsteyer/angular-oauth2-oidc/master/oidc.png)
 
+## Build and publish
+nvm use 11
+cd angular-oauth2-oidc
+npm run build
+cd dist
+npm publish --access public 
 ## Credits
 
 - [generator-angular2-library](https://github.com/jvandemo/generator-angular2-library) for scaffolding an Angular library
