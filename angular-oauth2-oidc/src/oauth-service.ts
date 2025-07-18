@@ -3,10 +3,12 @@ import { HttpClient, HttpHeaders, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs/Observable';
 import { Subject } from 'rxjs/Subject';
 import { Subscription } from 'rxjs/Subscription';
-import { of } from 'rxjs/observable/of';
-import { from } from 'rxjs/observable/from';
-import { race } from 'rxjs/observable/race';
-import { filter, delay, first, tap, map, switchMap } from 'rxjs/operators';
+import 'rxjs/add/operator/switchMap';
+import 'rxjs/add/operator/map';
+import 'rxjs/add/operator/do';
+import 'rxjs/add/observable/from';
+import 'rxjs/add/observable/of';
+import 'rxjs/add/operator/filter';
 
 import { ValidationHandler, ValidationParams } from './token-validation/validation-handler';
 import { UrlHelperService } from './url-helper.service';
@@ -158,25 +160,24 @@ export class OAuthService
      * @param listenTo Setup automatic refresh of a specific token type
      */
     public setupAutomaticSilentRefresh(params: object = {}, listenTo?: 'access_token' | 'id_token' | 'any', noPrompt = true) {
-      let shouldRunSilentRefresh = true;
-      this.events.pipe(
-        tap((e: OAuthEvent) => {
-          if (e.type === 'token_received') {
+        let shouldRunSilentRefresh = true;
+        this.events
+        .do((e: OAuthEvent) => {
+            if (e.type === 'token_received') {
             shouldRunSilentRefresh = true;
-          } else if (e.type === 'logout') {
+            } else if (e.type === 'logout') {
             shouldRunSilentRefresh = false;
-          }
-        }),
-        filter((e: OAuthEvent) => e.type === 'token_expires')
-      ).subscribe((e: OAuthEvent) => {
-        const event = e as OAuthInfoEvent;
-        if ((listenTo == null || listenTo === 'any' || event.info === listenTo) && shouldRunSilentRefresh) {
-          // this.silentRefresh(params, noPrompt).catch(_ => {
-          this.refreshInternal(params, noPrompt).catch(_ => {
-            this.debug('Automatic silent refresh did not work');
-          });
-        }
-      });
+            }
+        })
+        .filter((e: OAuthEvent) => e.type === 'token_expires')
+        .subscribe((e: OAuthEvent) => {
+            const event = e as OAuthInfoEvent;
+            if ((listenTo == null || listenTo === 'any' || event.info === listenTo) && shouldRunSilentRefresh) {
+            this.refreshInternal(params, noPrompt).catch(_ => {
+                this.debug('Automatic silent refresh did not work');
+            });
+            }
+        });
 
       this.restartRefreshTimerIfStillLoggedIn();
     }
@@ -679,18 +680,15 @@ export class OAuthService
 
             this.http
                 .post<TokenResponse>(this.tokenEndpoint, params, { headers })
-                .pipe(switchMap((tokenResponse: TokenResponse) => {
+                .switchMap((tokenResponse: TokenResponse) => {
                     if (tokenResponse.id_token) {
-                        return from(this.processIdToken(tokenResponse.id_token, tokenResponse.access_token, true))
-                            .pipe(
-                                tap((result: ParsedIdToken) => this.storeIdToken(result)),
-                                map(_ => tokenResponse)
-                            );
+                        return Observable.from(this.processIdToken(tokenResponse.id_token, tokenResponse.access_token, true))
+                            .do((result: ParsedIdToken) => this.storeIdToken(result))
+                            .map(_ => tokenResponse);
+                    } else {
+                        return Observable.of(tokenResponse);
                     }
-                    else {
-                        return of(tokenResponse);
-                    }
-                }))
+                })
                 .subscribe(
                     tokenResponse => {
                         this.debug('refresh tokenResponse', tokenResponse);
@@ -805,32 +803,30 @@ export class OAuthService
             document.body.appendChild(iframe);
         });
 
-        const errors = this.events.pipe(
-            filter(e => e instanceof OAuthErrorEvent),
-            first()
-        );
-        const success = this.events.pipe(
-            filter((e: OAuthEvent) => e.type === 'silently_refreshed'),
-            first()
-        );
-        const timeout = of(
-            new OAuthErrorEvent('silent_refresh_timeout', null)
-        ).pipe(delay(this.silentRefreshTimeout));
+        const errors = this.events
+            .filter(e => e instanceof OAuthErrorEvent)
+            .first();
 
-        return race([errors, success, timeout])
-            .pipe(
-                tap((e: OAuthEvent) => {
-                    if (e.type === 'silent_refresh_timeout') {
-                        this.eventsSubject.next(e);
-                    }
-                }),
-                map((e: OAuthEvent) => {
-                    if (e instanceof OAuthErrorEvent) {
-                        throw e;
-                    }
-                    return e;
-                })
-            )
+        const success = this.events
+            .filter((e: OAuthEvent) => e.type === 'silently_refreshed')
+            .first();
+
+        const timeout = Observable.of(
+            new OAuthErrorEvent('silent_refresh_timeout', null)
+        ).delay(this.silentRefreshTimeout);
+
+        return Observable.race(errors, success, timeout)
+            .do((e: OAuthEvent) => {
+                if (e.type === 'silent_refresh_timeout') {
+                    this.eventsSubject.next(e);
+                }
+            })
+            .map((e: OAuthEvent) => {
+                if (e instanceof OAuthErrorEvent) {
+                    throw e;
+                }
+                return e;
+            })
             .toPromise();
     }
 
@@ -1860,8 +1856,9 @@ export class OAuthService
         if (this.loginUrl !== '') {
             this.initCodeFlowInternal(additionalState, params);
         } else {
-            this.events.pipe(filter((e: OAuthEvent) => e.type === 'discovery_document_loaded'))
-            .subscribe(_ => this.initCodeFlowInternal(additionalState, params));
+            this.events
+                .filter((e: OAuthEvent) => e.type === 'discovery_document_loaded')
+                .subscribe(_ => this.initCodeFlowInternal(additionalState, params));
         }
     }
 
