@@ -17,7 +17,7 @@ import { OAuthStorage, LoginOptions, ParsedIdToken, OidcDiscoveryDoc, TokenRespo
 import { b64DecodeUnicode, base64UrlEncode } from './base64-helper';
 import { AuthConfig } from './auth.config';
 import { WebHttpUrlEncodingCodec } from './encoder';
-import { CryptoHandler } from './token-validation/crypto-handler';
+import { HashHandler } from './token-validation/hash-handler';
 
 /**
  * Service for logging in and logging out with
@@ -81,7 +81,7 @@ export class OAuthService
         @Optional() tokenValidationHandler: ValidationHandler,
         @Optional() private config: AuthConfig,
         private urlHelper: UrlHelperService,
-        @Optional() protected crypto: CryptoHandler) {
+        @Optional() protected crypto: HashHandler,) {
 
         super();
 
@@ -1797,7 +1797,7 @@ export class OAuthService
     };
 
     protected createNonce(): Promise<string> {
-        return new Promise((resolve) => {
+        return new Promise(resolve => {
             if (this.rngUrl) {
                 throw new Error(
                     'createNonce with rng-web-api has not been implemented so far'
@@ -1805,26 +1805,36 @@ export class OAuthService
             }
 
             /*
-             * This alphabet uses a-z A-Z 0-9 _- symbols.
-             * Symbols order was changed for better gzip compression.
+             * This alphabet is from:
+             * https://tools.ietf.org/html/rfc7636#section-4.1
+             *
+             * [A-Z] / [a-z] / [0-9] / "-" / "." / "_" / "~"
              */
-            const url = 'Uint8ArdomValuesObj012345679BCDEFGHIJKLMNPQRSTWXYZ_cfghkpqvwxyz-';
-            let size = 40;
+            const unreserved =
+                'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+            let size = 45;
             let id = '';
 
-            const crypto = self.crypto || self['msCrypto'];
+            const crypto =
+                typeof self === 'undefined' ? null : self.crypto || self['msCrypto'];
             if (crypto) {
-                const bytes = crypto.getRandomValues(new Uint8Array(size));
-                while (0 < size--) {
-                    id += url[bytes[size] & 63];
+                let bytes = new Uint8Array(size);
+                crypto.getRandomValues(bytes);
+
+                // Needed for IE
+                if (!bytes.map) {
+                    (bytes as any).map = Array.prototype.map;
                 }
+
+                bytes = bytes.map(x => unreserved.charCodeAt(x % unreserved.length));
+                id = String.fromCharCode.apply(null, bytes);
             } else {
                 while (0 < size--) {
-                    id += url[Math.random() * 64 | 0];
+                    id += unreserved[(Math.random() * unreserved.length) | 0];
                 }
             }
 
-            resolve(id);
+            resolve(base64UrlEncode(id));
         });
     }
 
