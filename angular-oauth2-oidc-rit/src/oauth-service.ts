@@ -1147,14 +1147,21 @@ export class OAuthService
         }
     }
 
-    private storeAccessTokenResponse(accessToken: string, refreshToken: string, expiresIn: number, grantedScopes: String): void {
+    protected storeAccessTokenResponse(
+        accessToken: string,
+        refreshToken: string,
+        expiresIn: number,
+        grantedScopes: String
+    ): void {
         this._storage.setItem('access_token', accessToken);
-        this._storage.setItem('granted_scopes', JSON.stringify(grantedScopes.split('+')));
+        if (grantedScopes) {
+            this._storage.setItem('granted_scopes', JSON.stringify(grantedScopes.split('+')));
+        }
         this._storage.setItem('access_token_stored_at', '' + Date.now());
         if (expiresIn) {
-            let expiresInMilliSeconds = expiresIn * 1000;
-            let now = new Date();
-            let expiresAt = now.getTime() + expiresInMilliSeconds;
+            const expiresInMilliSeconds = expiresIn * 1000;
+            const now = new Date();
+            const expiresAt = now.getTime() + expiresInMilliSeconds;
             this._storage.setItem('expires_at', '' + expiresAt);
         }
 
@@ -1237,6 +1244,17 @@ export class OAuthService
             .set('grant_type', 'authorization_code')
             .set('code', code)
             .set('redirect_uri', this.redirectUri);
+
+        if (!this.disablePKCE) {
+            const pkciVerifier = this._storage.getItem('PKCI_verifier');
+
+            if (!pkciVerifier) {
+                console.warn('No PKCI verifier found in oauth storage!');
+            } else {
+                params = params.set('code_verifier', pkciVerifier);
+            }
+        }
+
         return this.fetchAndProcessToken(params);
     }
 
